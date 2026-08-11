@@ -1,5 +1,5 @@
 # Convenience commands. Everything is stdlib Python 3 — no install step.
-.PHONY: help test bench serve serve-open smoke install install-user docker-build docker-run clean
+.PHONY: help test bench serve serve-open smoke doctor status install install-user docker-build docker-run clean
 
 PYTHON ?= python3
 PORT   ?= 8787
@@ -9,6 +9,8 @@ help:
 	@echo "make serve         run the server (token from COORD_TOKEN env)"
 	@echo "make serve-open    run the server in open mode (no auth, dev only)"
 	@echo "make smoke         curl smoke test against a running server"
+	@echo "make doctor        diagnose the local Redi setup"
+	@echo "make status        show live claims for the current repo"
 	@echo "make install       install the hook into ./.claude/settings.json"
 	@echo "make install-user  install the hook into ~/.claude/settings.json"
 	@echo "make docker-build  build the server image"
@@ -29,6 +31,12 @@ serve-open:
 
 smoke:
 	COORD_URL=http://127.0.0.1:$(PORT) ./tests/smoke.sh
+
+doctor:
+	$(PYTHON) cli/redi.py doctor
+
+status:
+	$(PYTHON) cli/redi.py status
 
 install:
 	$(PYTHON) hook/install.py

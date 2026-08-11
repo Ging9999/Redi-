@@ -30,3 +30,6 @@ jobs:
 
       - name: Installer dry-run smoke check
         run: python3 hook/install.py --dry-run --settings /tmp/settings.json
+
+      - name: CLI import + help smoke check
+        run: python3 cli/redi.py --help

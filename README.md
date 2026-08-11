@@ -14,19 +14,37 @@ statement and decide for itself: wait, work elsewhere, coordinate, or proceed.
 > Sam's session is on branch `feat/rate-limit`, started 4 minutes ago
 > working on: "add per-IP rate limiting to the auth middleware."
 
-This is an MVP built to the spec in `docs/agentcoordinationmvp.md`.
+Built to `docs/agentcoordinationmvp.md` (v1), then hardened for the hot path and
+usability per `docs/rediv1_1efficiencyux.md` (v1.1). **The hot path is the
+product**: every `Edit`/`Write` pays Redi's cost, so `PreToolUse` p50 was driven
+from **89ms to 32ms** (see `docs/PERF.md`).
 
 ---
 
 ## Architecture
 
-Three pieces (spec section 2), **Python 3 stdlib only — no dependencies**:
+Four pieces, **Python 3 stdlib only — no dependencies**:
 
 | Piece | File | Role |
 |---|---|---|
-| Coordination server | `server/coordinator.py` + `server/store.py` | Single-process HTTP service holding the claims registry, SQLite-backed. |
+| Coordination server | `server/coordinator.py` + `server/store.py` | Single-process HTTP service holding the claims registry, SQLite-backed (WAL). |
 | Hook client | `hook/coordinator_hook.py` | One script wired into Claude Code lifecycle events on each machine. |
-| Activity endpoint | `GET /repos/{repo_key}/activity` | JSON view of all live claims, for debugging / a later dashboard. |
+| CLI | `cli/redi.py` (`./redi`) | `redi doctor` (diagnose setup) and `redi status` (see live claims). |
+| Activity endpoint | `GET /repos/{repo_key}/activity` | JSON view of live claims + reporting contributors; backs `redi status`. |
+
+Zero pip installs is a deliberate choice: a coordination tool has to be
+installed on every developer's machine, so the friction of dependencies is a
+real adoption cost.
+
+### The hot path (v1.1)
+
+Every edit runs the `PreToolUse` hook, so it must be cheap. Session-stable values
+(repo key, root, machine id, display name, config) are resolved **once** at
+`SessionStart` and cached to `~/.cache/redi`; the steady-state edit path never
+shells out to git and imports no `urllib`/`subprocess` unless it actually makes a
+request. On a **solo repo** the server hands back a `quiet_until` window and the
+hook skips the network entirely — a 50-edit run makes ~1 request. Full numbers
+and the (negative) local-daemon decision are in `docs/PERF.md`.
 
 Zero pip installs is a deliberate choice: a coordination tool has to be
 installed on every developer's machine, so the friction of dependencies is a
@@ -82,14 +100,15 @@ Server configuration (all env vars):
 | `COORD_HOST` | `127.0.0.1` | Bind address (use `0.0.0.0` behind a tunnel/VPS). |
 | `COORD_PORT` | `8787` | Port. |
 | `COORD_DB` | `coordinator.db` | SQLite path, or `:memory:`. |
-| `COORD_TTL_SECONDS` | `900` | Claim TTL (15 min). |
+| `COORD_TTL_SECONDS` | `900` | Claim TTL (15 min); also sets refresh debounce to TTL/3. |
+| `COORD_QUIET_SECONDS` | `60` | Solo-session backoff window (spec A3). Lower = tighter coverage, more requests. |
 | `COORD_TOKEN` | *(unset)* | Bearer token. Unset = open mode (dev only). |
 
 ### 2. Wire the hook into Claude Code
 
-Use the installer — it merges the four hooks and the `COORD_*` env block into
-your `.claude/settings.json`, preserving anything already there, and is
-idempotent:
+Use the installer — it merges the five hooks (`SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `Stop`) and the `COORD_*` env block into your
+`.claude/settings.json`, preserving anything already there, and is idempotent:
 
 ```bash
 # project-level (./.claude/settings.json), local server:
@@ -102,6 +121,14 @@ python3 hook/install.py --user --url https://coord.example.com --token SECRET
 python3 hook/install.py --dry-run
 ```
 
+**Commit `.claude/settings.json` at the project level.** This is the single
+biggest lever on adoption: a teammate who clones the repo is covered without
+doing anything, and Redi only prevents collisions if *everyone* runs it (a
+partial rollout looks identical to a working one). Shared, non-secret settings
+(server URL, mode) can also live in a committed `.redi.toml` at the repo root
+(see `examples/.redi.toml`); env vars override it. Keep the token in the
+environment, not in a committed file.
+
 Prefer to do it by hand? Copy the `env` and `hooks` blocks from
 `examples/settings.json` and set the absolute path to `coordinator_hook.py`.
 Hook environment variables are documented in `hook/config.example.json`.
@@ -109,10 +136,19 @@ Hook environment variables are documented in `hook/config.example.json`.
 **Matchers are case-sensitive** (spec section 3): `Edit|Write` matches the Edit
 and Write tools; `edit` matches nothing.
 
-### 3. Try it with curl
+### 3. Check it works — `redi doctor`
+
+Fail-open is right at runtime but terrible during setup: a wrong token, a typo'd
+URL, or an unregistered hook all produce a Redi that silently does nothing. Run
+the doctor to make that visible:
 
 ```bash
-./tests/smoke.sh          # exercises every endpoint against a running server
+./redi doctor     # hooks wired? server reachable? auth ok? git remote? who else is here?
+./redi status     # live claims for this repo: who, file, branch, intent, age
+```
+
+```bash
+./tests/smoke.sh          # or: exercise every endpoint against a running server with curl
 ```
 
 ### Run the server in Docker (for the two-machine test)
@@ -127,22 +163,30 @@ The image is stdlib-only (no pip install), persists the SQLite store on the
 
 ---
 
-## Hook wiring (spec section 3)
+## Hook wiring
 
 | Event | Matcher | What the hook does |
 |---|---|---|
-| `UserPromptSubmit` | — | POST the user's prompt as the session's intent. |
-| `PreToolUse` | `Edit\|Write` | Check for conflicts **before** the edit; warn/ask/block — and, if clear, **stake the claim immediately** (see below). |
-| `PostToolUse` | `Edit\|Write` | Register/refresh the claim on the edited file. |
-| `Stop` | — | Release all claims for the session. |
+| `SessionStart` | — | Resolve session-stable values (repo key, root, identity, config) once → cache. Enables the fast path. |
+| `UserPromptSubmit` | — | POST the prompt as the session's intent — every prompt, so intent stays current (B6). |
+| `PreToolUse` | `Edit\|Write` | One atomic `acquire`: check + stake; then warn/ask/block/force. Skipped entirely while quiet (A3). |
+| `PostToolUse` | `Edit\|Write` | Refresh the claim, debounced to once per TTL/3 (A4). |
+| `Stop` | — | Release all claims for the session and drop its cache. |
 
-**Staking at `PreToolUse` narrows the race.** A naive design only *checks* at
-`PreToolUse` and doesn't record the claim until `PostToolUse` (after the edit) —
-so two agents starting within the same moment both check-clear and then collide.
-Instead, the instant an agent's check comes back clean, it stakes its claim,
-before the edit runs. The next agent's check a moment later sees it.
-`PostToolUse` then refreshes. This shrinks the collision window to the single
-check round-trip; it doesn't eliminate it (see Known limitations).
+**`acquire` stakes atomically and narrows the race.** A naive design only
+*checks* at `PreToolUse` and doesn't record the claim until `PostToolUse` (after
+the edit), so two agents starting in the same moment both check-clear and
+collide. Instead `POST /claims/acquire` checks conflicts and stakes the caller's
+claim in **one transaction and one round trip** (spec A2). This shrinks the
+collision window to a single request; it doesn't eliminate it (see Known
+limitations).
+
+**Solo-session backoff (A3).** When the server sees the caller is the only active
+session on a repo, it returns a `quiet_until` timestamp; the hook caches it and
+makes **no network call at all** until it lapses (default 60s, `COORD_QUIET_SECONDS`).
+Tradeoff, documented: when a teammate starts up, the already-issued quiet window
+can't be revoked, so there's up to one window of unwarned edits. Tighten the
+window for teams that want it.
 
 Mechanics we deliberately got right:
 
@@ -159,29 +203,52 @@ Mechanics we deliberately got right:
 
 ---
 
-## API (spec section 5)
+## API
 
 | Method + path | Body | Returns |
 |---|---|---|
-| `POST /claims/check` | `{repo_key, file_path, session_id, machine_id}` | `{conflicts: [Claim]}` — excludes the caller's own claims. |
-| `POST /claims` | claim fields (+ optional `intent`) | `{claim: Claim}` — register or refresh, extending `expires_at`. |
+| `POST /claims/acquire` | `{repo_key, file_path, session_id, machine_id, …}` | `{conflicts, claim, quiet_until, overrides}` — the hot path (A2/A3/B5). |
+| `POST /claims/check` | `{repo_key, file_path, session_id, machine_id}` | `{conflicts: [Claim]}` — read-only, excludes caller. |
+| `POST /claims` | claim fields (+ optional `intent`) | `{claim: Claim}` — register/refresh. |
+| `POST /claims/override` | `{repo_key, file_path, target_session, overrider_name, reason}` | `{ok: true}` — record an override note (B5). |
 | `POST /sessions/{session_id}/intent` | `{intent}` | `{ok: true}` |
 | `POST /sessions/{session_id}/release` | — | `{released: N}` |
-| `GET /repos/{repo_key}/activity` | — | `{claims: [Claim]}` |
-| `GET /healthz` | — | `{ok: true}` (no auth) |
+| `GET /repos/{repo_key}/activity?days=N` | — | `{claims, contributors}` — supports `If-None-Match`/`304` (A8). |
+| `GET /healthz` | — | `{ok: true, version}` (no auth) |
 
-Auth is a single bearer token in `COORD_TOKEN` (spec section 5), compared in
-constant time. Each `Claim` includes `age_seconds` and `expires_in_seconds` so
-the reading agent can judge how long the other agent has been at it and how long
-its claim will last, without doing clock math. `/healthz` reports the server
-`version` and requires no auth (for load-balancer / container health checks).
+Auth is a single bearer token in `COORD_TOKEN`, compared in constant time. Each
+`Claim` carries `age_seconds`, `expires_in_seconds`, and `intent_age_seconds`
+(so a reader can judge how stale the stated intent is — B6). `activity` also
+lists **contributors** who reported in the last N days, so a team can see who is
+actually running Redi (coverage, B2).
+
+## Coordination quality (v1.1)
+
+- **Repeat-warning suppression (B4).** Once an agent has been warned about a
+  given `(file, other-session)`, that warning is suppressed for
+  `COORD_SUPPRESS_SECONDS` (default 10 min) — unless the other agent's *intent*
+  changes, which is genuinely new information. Two agents working the same file
+  all afternoon get one warning, not one per edit.
+- **Explicit override (B5).** In `block` mode an agent that genuinely must edit
+  sets `COORD_FORCE=1` (with an optional `COORD_FORCE_REASON`). It proceeds and
+  records a server-side override the other agent sees on its next check —
+  "Priya overrode your claim on `auth.ts`: hotfix must ship" beats a silent
+  overwrite.
+- **Intent staleness (B6).** Intent captured at prompt time drifts; a
+  confidently wrong 40-minute-old intent is worse than none. Intent is
+  re-captured on every prompt, and the warning hedges anything older than ~20
+  min ("started from: …" instead of "working on: …").
+- **Coverage nudge (B2).** `SessionStart` notes once if the repo has had recent
+  git contributors who aren't reporting Redi claims — surfacing a partial
+  rollout instead of letting it masquerade as a working one.
 
 ## Claim lifecycle (spec section 6)
 
 - Claims carry a **15-minute TTL**.
-- `PostToolUse` refreshes on every edit, so an active agent keeps its claim
-  alive; `created_at` is preserved across refreshes.
-- `Stop` releases explicitly.
+- `PostToolUse` refreshes, **debounced to once per TTL/3** (A4) — an active agent
+  keeps its claim alive without a request per keystroke; `created_at` is
+  preserved across refreshes.
+- `Stop` releases explicitly and drops the session cache.
 - Expired claims are **swept lazily on read**, and a background sweeper runs
   every ~TTL/2 so an idle repo's store doesn't grow unbounded either — a crashed
   session (SIGKILL) never holds a file hostage.
@@ -257,10 +324,17 @@ Agents don't only edit through `Edit`/`Write`. They also run `sed`, `python`,
 codemods, and formatters through `Bash`, and those **bypass the `Edit|Write`
 matcher entirely** — no claim is checked or registered for them.
 
-This is **not solved in v1**, by design. Matching `Bash` and parsing arbitrary
+This is **not solved**, by design. Matching `Bash` and parsing arbitrary
 commands for the file paths they touch is a large surface area that's easy to
 get wrong (a mis-parse either misses a real edit or blocks an unrelated
-command). It's noted here as a documented gap and a possible v2 direction.
+command). It's noted here as a documented gap and a possible future direction.
+
+### Batch turns (A7) — not built
+
+An agent editing eight files in one turn makes up to eight `PreToolUse` calls.
+Claude Code exposes no per-turn batch event to coalesce them, and A4 (refresh
+debounce) plus A3 (quiet backoff) already remove most of the traffic, so this is
+deferred rather than built. Revisit if a batch hook event appears.
 
 ### Residual simultaneous-start race
 
@@ -294,14 +368,15 @@ Coverage maps to the spec's section-10 scenarios:
 | Same repo cloned to different paths → keys match | `test_hook.test_different_clone_locations_same_rel` |
 | Windows & POSIX separators → same claim | `test_hook.test_windows_and_posix_same_claim` |
 
-Plus behavior tests for `PreToolUse` staking, `ask`/`block` modes, intent
-length-capping, mode validation, and the settings.json installer merge. The
-suite (58 tests) runs on CI (`.github/workflows/ci.yml`) across Python
-3.9/3.11/3.12.
+Plus v1.1 behavior tests: atomic `acquire`, quiet backoff, `EXPLAIN QUERY PLAN`
+index use, contributors, overrides, intent staleness (`test_v11_store.py`); the
+zero-subprocess hot path, quiet-skip, refresh debounce, warning suppression, and
+force/override (`test_v11_hook.py`); CLI settings resolution and `.redi.toml`
+(`test_cli_config.py`). ~90 tests, on CI across Python 3.9/3.11/3.12.
 
 `test_e2e_hook.py` drives the hook script exactly as Claude Code would (event
 JSON piped to stdin, exit code checked) against a live server in a real git
-repo.
+repo. `tests/bench.py` (`make bench`) measures the hot path; see `docs/PERF.md`.
 
 ---
 

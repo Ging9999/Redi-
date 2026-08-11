@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Thin wrapper so `./redi doctor` / `./redi status` work from the repo root.
+exec python3 "$(dirname "$0")/cli/redi.py" "$@"

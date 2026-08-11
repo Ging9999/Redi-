@@ -26,6 +26,7 @@ import sys
 
 HOOK_EVENTS = [
     # (event name, matcher or None)
+    ("SessionStart", None),   # resolves the session cache — enables the fast path
     ("UserPromptSubmit", None),
     ("PreToolUse", "Edit|Write"),
     ("PostToolUse", "Edit|Write"),

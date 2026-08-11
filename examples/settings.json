@@ -9,6 +9,17 @@
   },
 
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /ABSOLUTE/PATH/TO/hook/coordinator_hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

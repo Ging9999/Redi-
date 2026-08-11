@@ -29,7 +29,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 

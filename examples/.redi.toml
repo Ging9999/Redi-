@@ -1,0 +1,11 @@
+# Example .redi.toml — commit this at your repo root so server URL and mode are
+# shared team settings instead of something each person exports in their shell.
+# Environment variables (COORD_URL, COORD_MODE, ...) still override these.
+#
+# Keys may be top-level (as below) or under a [redi] table.
+
+url = "https://redi.internal.example.com"
+mode = "warn"          # warn | ask | block
+timeout = 0.5          # per-request timeout, seconds
+ttl_seconds = 900      # claim TTL (also sets refresh debounce to TTL/3)
+# token = "shared-secret"   # prefer COORD_TOKEN in the environment for secrets

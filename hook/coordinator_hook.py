@@ -6,7 +6,7 @@ fires a hook by piping a JSON event on stdin; this script dispatches on the
 ``hook_event_name`` field:
 
     UserPromptSubmit  -> POST the prompt as the session's intent
-    PreToolUse        -> check for conflicting claims; warn/ask/block on conflict
+    PreToolUse        -> check for conflicts; warn/ask/block, else stake the claim
     PostToolUse       -> register/refresh a claim on the edited file
     Stop              -> release all claims for the session
 
@@ -57,9 +57,22 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
 
 
+VALID_MODES = ("warn", "ask", "block")
+
+
+def _normalize_mode(raw: str) -> str:
+    mode = (raw or "").strip().lower()
+    if mode not in VALID_MODES:
+        sys.stderr.write(
+            f"[coordinator-hook] unknown COORD_MODE '{raw}', falling back to 'warn'\n"
+        )
+        return "warn"
+    return mode
+
+
 COORD_URL = os.environ.get("COORD_URL", "http://127.0.0.1:8787").rstrip("/")
 COORD_TOKEN = os.environ.get("COORD_TOKEN") or None
-COORD_MODE = os.environ.get("COORD_MODE", "warn").strip().lower()
+COORD_MODE = _normalize_mode(os.environ.get("COORD_MODE", "warn"))
 COORD_TIMEOUT = float(os.environ.get("COORD_TIMEOUT", "0.5"))
 COORD_ENABLED = _env_bool("COORD_ENABLED", True)
 DEFAULT_ID_FILE = os.path.join(
@@ -143,12 +156,20 @@ def repo_key_for(cwd: str) -> str | None:
     return normalize_remote(remote)
 
 
-def repo_root(cwd: str) -> str | None:
-    return _run_git(["rev-parse", "--show-toplevel"], cwd)
-
-
-def current_branch(cwd: str) -> str:
-    return _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd) or ""
+def root_and_branch(cwd: str) -> tuple[str | None, str]:
+    """Repo root and current branch in a single git call, to stay under the
+    ~500ms latency budget (spec section 3). ``git rev-parse`` prints the
+    toplevel then resolves HEAD, one line each."""
+    out = _run_git(["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"], cwd)
+    if out:
+        lines = out.splitlines()
+        root = lines[0].strip() if lines else None
+        branch = lines[1].strip() if len(lines) > 1 else ""
+        return root, branch
+    # Combined call fails on a repo with no commits (HEAD is unresolvable);
+    # fall back to resolving the root alone, with an unknown branch.
+    root = _run_git(["rev-parse", "--show-toplevel"], cwd)
+    return (root or None), ""
 
 
 def display_name(cwd: str) -> str:
@@ -239,10 +260,10 @@ class HookContext:
     def repo_context(self):
         """Return (repo_key, root, branch, display_name) or None if not a repo."""
         key = repo_key_for(self.cwd)
-        root = repo_root(self.cwd)
+        root, branch = root_and_branch(self.cwd)
         if not key or not root:
             return None
-        return key, root, current_branch(self.cwd), display_name(self.cwd)
+        return key, root, branch, display_name(self.cwd)
 
     def file_path(self):
         return self.tool_input.get("file_path") or self.tool_input.get("filePath")
@@ -260,16 +281,7 @@ def handle_user_prompt_submit(ctx: HookContext) -> int:
     return 0
 
 
-def handle_post_tool_use(ctx: HookContext) -> int:
-    """Register/refresh a claim on the file that was just edited."""
-    rc = ctx.repo_context()
-    fp = ctx.file_path()
-    if not rc or not fp:
-        return 0
-    repo_key, root, branch, name = rc
-    rel = normalize_file_path(fp, root)
-    if not rel:
-        return 0
+def _register_claim(ctx: HookContext, repo_key: str, rel: str, branch: str, name: str) -> None:
     _post(
         "/claims",
         {
@@ -281,6 +293,19 @@ def handle_post_tool_use(ctx: HookContext) -> int:
             "branch": branch,
         },
     )
+
+
+def handle_post_tool_use(ctx: HookContext) -> int:
+    """Register/refresh a claim on the file that was just edited."""
+    rc = ctx.repo_context()
+    fp = ctx.file_path()
+    if not rc or not fp:
+        return 0
+    repo_key, root, branch, name = rc
+    rel = normalize_file_path(fp, root)
+    if not rel:
+        return 0
+    _register_claim(ctx, repo_key, rel, branch, name)
     return 0
 
 
@@ -347,7 +372,7 @@ def handle_pre_tool_use(ctx: HookContext) -> int:
     fp = ctx.file_path()
     if not rc or not fp:
         return 0
-    repo_key, root, _branch, _name = rc
+    repo_key, root, branch, name = rc
     rel = normalize_file_path(fp, root)
     if not rel:
         return 0
@@ -366,6 +391,12 @@ def handle_pre_tool_use(ctx: HookContext) -> int:
         return 0
     conflicts = result.get("conflicts") or []
     if not conflicts:
+        # No conflict: stake the claim NOW, before the edit runs, rather than
+        # waiting for PostToolUse. This shrinks the window in which two agents
+        # starting near-simultaneously both check-clear and then collide — the
+        # moment we pass the check we hold the file, so the next agent's check
+        # sees us. PostToolUse still refreshes afterwards.
+        _register_claim(ctx, repo_key, rel, branch, name)
         return 0
 
     message = _format_conflict_message(conflicts)

@@ -87,10 +87,23 @@ Server configuration (all env vars):
 
 ### 2. Wire the hook into Claude Code
 
-Copy the `env` and `hooks` blocks from `examples/settings.json` into your
-`.claude/settings.json`, and set the absolute path to `coordinator_hook.py`.
-Every developer points `COORD_URL` at the same server and shares `COORD_TOKEN`.
+Use the installer — it merges the four hooks and the `COORD_*` env block into
+your `.claude/settings.json`, preserving anything already there, and is
+idempotent:
 
+```bash
+# project-level (./.claude/settings.json), local server:
+python3 hook/install.py
+
+# user-level, shared server with a token:
+python3 hook/install.py --user --url https://coord.example.com --token SECRET
+
+# preview the merge without writing:
+python3 hook/install.py --dry-run
+```
+
+Prefer to do it by hand? Copy the `env` and `hooks` blocks from
+`examples/settings.json` and set the absolute path to `coordinator_hook.py`.
 Hook environment variables are documented in `hook/config.example.json`.
 
 **Matchers are case-sensitive** (spec section 3): `Edit|Write` matches the Edit
@@ -102,6 +115,16 @@ and Write tools; `edit` matches nothing.
 ./tests/smoke.sh          # exercises every endpoint against a running server
 ```
 
+### Run the server in Docker (for the two-machine test)
+
+```bash
+docker build -t agent-coordinator .
+docker run -e COORD_TOKEN=secret -p 8787:8787 -v coord-data:/data agent-coordinator
+```
+
+The image is stdlib-only (no pip install), persists the SQLite store on the
+`/data` volume, and has a built-in healthcheck.
+
 ---
 
 ## Hook wiring (spec section 3)
@@ -109,9 +132,17 @@ and Write tools; `edit` matches nothing.
 | Event | Matcher | What the hook does |
 |---|---|---|
 | `UserPromptSubmit` | — | POST the user's prompt as the session's intent. |
-| `PreToolUse` | `Edit\|Write` | Check for conflicting claims **before** the edit; warn/ask/block. |
+| `PreToolUse` | `Edit\|Write` | Check for conflicts **before** the edit; warn/ask/block — and, if clear, **stake the claim immediately** (see below). |
 | `PostToolUse` | `Edit\|Write` | Register/refresh the claim on the edited file. |
 | `Stop` | — | Release all claims for the session. |
+
+**Staking at `PreToolUse` narrows the race.** A naive design only *checks* at
+`PreToolUse` and doesn't record the claim until `PostToolUse` (after the edit) —
+so two agents starting within the same moment both check-clear and then collide.
+Instead, the instant an agent's check comes back clean, it stakes its claim,
+before the edit runs. The next agent's check a moment later sees it.
+`PostToolUse` then refreshes. This shrinks the collision window to the single
+check round-trip; it doesn't eliminate it (see Known limitations).
 
 Mechanics we deliberately got right:
 
@@ -139,9 +170,11 @@ Mechanics we deliberately got right:
 | `GET /repos/{repo_key}/activity` | — | `{claims: [Claim]}` |
 | `GET /healthz` | — | `{ok: true}` (no auth) |
 
-Auth is a single bearer token in `COORD_TOKEN` (spec section 5). Each `Claim`
-includes an `age_seconds` field so the reading agent doesn't have to do clock
-math.
+Auth is a single bearer token in `COORD_TOKEN` (spec section 5), compared in
+constant time. Each `Claim` includes `age_seconds` and `expires_in_seconds` so
+the reading agent can judge how long the other agent has been at it and how long
+its claim will last, without doing clock math. `/healthz` reports the server
+`version` and requires no auth (for load-balancer / container health checks).
 
 ## Claim lifecycle (spec section 6)
 
@@ -149,9 +182,12 @@ math.
 - `PostToolUse` refreshes on every edit, so an active agent keeps its claim
   alive; `created_at` is preserved across refreshes.
 - `Stop` releases explicitly.
-- Expired claims are **swept lazily on read** — a crashed session (SIGKILL)
-  never holds a file hostage.
+- Expired claims are **swept lazily on read**, and a background sweeper runs
+  every ~TTL/2 so an idle repo's store doesn't grow unbounded either — a crashed
+  session (SIGKILL) never holds a file hostage.
 - All timestamps are **server-side**; client clocks are never trusted.
+- Intent strings are length-capped server-side (2000 chars) so a giant prompt
+  can't bloat rows or over-share what's echoed to other machines.
 
 ---
 
@@ -226,6 +262,16 @@ commands for the file paths they touch is a large surface area that's easy to
 get wrong (a mis-parse either misses a real edit or blocks an unrelated
 command). It's noted here as a documented gap and a possible v2 direction.
 
+### Residual simultaneous-start race
+
+Staking the claim at `PreToolUse` (above) shrinks but does not eliminate the
+window: two agents whose `PreToolUse` checks land in the same instant can both
+see no claim before either has staked. This is inherent to an advisory,
+check-then-act model without a lock, and acceptable for v1 — the tool warns and
+lets agents adapt; it does not guarantee mutual exclusion (that's a non-goal).
+A future version could close it with an atomic check-and-claim (a conditional
+insert that returns the existing claim if one appears first).
+
 ---
 
 ## Testing
@@ -244,8 +290,14 @@ Coverage maps to the spec's section-10 scenarios:
 | Same agent re-editing own file → no self-conflict | `test_e2e_hook.test_self_is_not_a_conflict` |
 | Session SIGKILL → claim expires | `test_store.test_expired_claim_is_swept` |
 | Server unreachable → fail open | `test_e2e_hook.test_server_unreachable_fails_open` |
+| **Server slow (3s) → times out and fails open** | `test_e2e_hook.test_slow_server_times_out_and_fails_open` |
 | Same repo cloned to different paths → keys match | `test_hook.test_different_clone_locations_same_rel` |
 | Windows & POSIX separators → same claim | `test_hook.test_windows_and_posix_same_claim` |
+
+Plus behavior tests for `PreToolUse` staking, `ask`/`block` modes, intent
+length-capping, mode validation, and the settings.json installer merge. The
+suite (58 tests) runs on CI (`.github/workflows/ci.yml`) across Python
+3.9/3.11/3.12.
 
 `test_e2e_hook.py` drives the hook script exactly as Claude Code would (event
 JSON piped to stdin, exit code checked) against a live server in a real git
@@ -258,7 +310,7 @@ repo.
 1. ✅ **Server skeleton** — claims registry, all endpoints, TTL sweep, SQLite/in-memory. Testable with `curl` (`tests/smoke.sh`).
 2. ✅ **Hook client** — path normalization, repo-key derivation, identity, four handlers. Testable by piping sample JSON.
 3. ✅ **Single-machine two-session test** — covered by `test_e2e_hook.py` (two sessions/machine-ids in one repo).
-4. ⏭️ **Two-machine test** — run the server on a VPS/tunnel, point two machines' `COORD_URL` at it. No code change needed.
+4. ⏭️ **Two-machine test** — `docker build` + `docker run` the server on a VPS/tunnel, `hook/install.py --user --url ...` on two machines. No code change needed.
 5. ⏭️ **Intent quality pass** — the real success criterion (spec section 11): does the message make the second agent behave *better*? That's a judgement call to iterate on in live use, not a test assertion.
 
 ## Success criterion (spec section 11)

@@ -105,6 +105,33 @@ class StoreTest(unittest.TestCase):
         self.assertIn("age_seconds", claim.to_dict())
         self.assertGreaterEqual(claim.to_dict()["age_seconds"], 0)
 
+    def test_expires_in_seconds_reported(self):
+        claim = self._reg("s1", "m1", ttl_seconds=100)
+        d = claim.to_dict()
+        self.assertIn("expires_in_seconds", d)
+        self.assertGreater(d["expires_in_seconds"], 0)
+        self.assertLessEqual(d["expires_in_seconds"], 100)
+
+    def test_intent_is_length_capped(self):
+        from store import MAX_INTENT_CHARS
+
+        huge = "x" * (MAX_INTENT_CHARS + 500)
+        self.store.set_intent("s1", huge)
+        claim = self._reg("s1", "m1")
+        self.assertLessEqual(len(claim.intent), MAX_INTENT_CHARS)
+        self.assertTrue(claim.intent.endswith("…"))
+
+    def test_intent_is_stripped(self):
+        self.store.set_intent("s1", "  add rate limiting  ")
+        claim = self._reg("s1", "m1")
+        self.assertEqual(claim.intent, "add rate limiting")
+
+    def test_sweep_is_public(self):
+        store = ClaimStore(db_path=":memory:", ttl_seconds=900)
+        store.register("r", "f", "s", "m", ttl_seconds=-1)
+        self.assertEqual(store.sweep(), 1)
+        store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

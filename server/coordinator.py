@@ -23,9 +23,12 @@ If ``COORD_TOKEN`` is unset the server runs open (development only) and says so.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import signal
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -33,6 +36,8 @@ from urllib.parse import unquote, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from store import DEFAULT_TTL_SECONDS, ClaimStore  # noqa: E402
 
+
+VERSION = "1.0.0"
 
 # Populated in main(); a module global so the handler class can reach it.
 STORE: ClaimStore | None = None
@@ -76,8 +81,8 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             return True  # open mode (dev)
         header = self.headers.get("Authorization", "")
         expected = f"Bearer {AUTH_TOKEN}"
-        # Constant-ish comparison; tokens are short-lived shared secrets in v1.
-        return header == expected
+        # Constant-time comparison so a wrong token can't be recovered by timing.
+        return hmac.compare_digest(header, expected)
 
     def _require_fields(self, data: dict, fields: list[str]) -> bool:
         missing = [f for f in fields if not data.get(f)]
@@ -91,7 +96,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
         path = urlparse(self.path).path
         if path == "/healthz":
-            self._send_json(200, {"ok": True})
+            self._send_json(200, {"ok": True, "version": VERSION})
             return
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
@@ -186,6 +191,26 @@ def build_server(host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), CoordinatorHandler)
 
 
+def _start_sweeper(interval_seconds: float, stop_event: threading.Event) -> threading.Thread:
+    """Background TTL sweep so an idle repo's DB doesn't grow unbounded.
+
+    Reads already sweep lazily (spec section 6); this just bounds growth when no
+    reads are happening. Runs as a daemon and exits promptly on shutdown.
+    """
+
+    def _loop() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                if STORE is not None:
+                    STORE.sweep()
+            except Exception as exc:  # noqa: BLE001 — never let the sweeper die.
+                sys.stderr.write(f"[coordinator] sweep error (ignored): {exc}\n")
+
+    t = threading.Thread(target=_loop, name="ttl-sweeper", daemon=True)
+    t.start()
+    return t
+
+
 def main() -> None:
     global STORE, AUTH_TOKEN
 
@@ -198,16 +223,30 @@ def main() -> None:
     STORE = ClaimStore(db_path=db_path, ttl_seconds=ttl)
 
     server = build_server(host, port)
+    stop_event = threading.Event()
+    # Sweep at half the TTL so lapsed claims never linger longer than ~1.5x TTL.
+    _start_sweeper(max(30.0, ttl / 2.0), stop_event)
+
     auth_state = "token auth ENABLED" if AUTH_TOKEN else "OPEN (no COORD_TOKEN set — dev only)"
     sys.stderr.write(
-        f"[coordinator] listening on http://{host}:{port}  db={db_path}  ttl={ttl}s  {auth_state}\n"
+        f"[coordinator] v{VERSION} listening on http://{host}:{port}  "
+        f"db={db_path}  ttl={ttl}s  {auth_state}\n"
     )
+
+    # Handle SIGTERM (Docker/systemd stop) as cleanly as Ctrl-C.
+    def _graceful(signum, _frame):
+        sys.stderr.write(f"\n[coordinator] signal {signum}, shutting down\n")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _graceful)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         sys.stderr.write("\n[coordinator] shutting down\n")
     finally:
-        server.shutdown()
+        stop_event.set()
+        server.server_close()
         STORE.close()
 
 

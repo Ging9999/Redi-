@@ -31,6 +31,20 @@ from typing import Optional
 # edit, so an actively working agent keeps its claim alive (spec section 6).
 DEFAULT_TTL_SECONDS = 15 * 60
 
+# Intent is captured from the user's prompt and echoed to every other machine,
+# so cap it: bounds the row size and limits how much of a prompt (which may
+# contain pasted secrets or noise) is stored and shared. Truncated with a marker.
+MAX_INTENT_CHARS = 2000
+
+
+def _clip_intent(intent: str) -> str:
+    if intent is None:
+        return ""
+    intent = str(intent).strip()
+    if len(intent) > MAX_INTENT_CHARS:
+        return intent[: MAX_INTENT_CHARS - 1].rstrip() + "…"
+    return intent
+
 
 @dataclass
 class Claim:
@@ -46,9 +60,13 @@ class Claim:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        now = _now()
         # Surface a human-friendly "how long ago" so callers (and the agent
         # reading the warning) don't have to do clock math.
-        d["age_seconds"] = max(0, int(_now() - self.created_at))
+        d["age_seconds"] = max(0, int(now - self.created_at))
+        # And how long until this claim lapses, so a reader can judge whether
+        # it's worth waiting the other agent out.
+        d["expires_in_seconds"] = max(0, int(self.expires_at - now))
         return d
 
 
@@ -108,6 +126,7 @@ class ClaimStore:
     def set_intent(self, session_id: str, intent: str) -> None:
         """Record a session's latest intent and propagate it to live claims."""
         now = _now()
+        intent = _clip_intent(intent)
         with self._lock:
             self._conn.execute(
                 """
@@ -152,7 +171,9 @@ class ClaimStore:
         with self._lock:
             # Fall back to the session's recorded intent when the caller does
             # not supply one explicitly (the common PostToolUse path).
-            resolved_intent = intent if intent is not None else self._get_intent(session_id)
+            resolved_intent = (
+                _clip_intent(intent) if intent is not None else self._get_intent(session_id)
+            )
 
             existing = self._conn.execute(
                 """
@@ -243,6 +264,10 @@ class ClaimStore:
         return [self._row_to_claim(r) for r in rows]
 
     # -- housekeeping ---------------------------------------------------------
+
+    def sweep(self) -> int:
+        """Public sweep, for a background timer to bound DB growth on idle repos."""
+        return self._sweep_expired()
 
     def _sweep_expired(self) -> int:
         """Delete claims whose TTL has lapsed. Called lazily on every read."""

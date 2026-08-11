@@ -81,6 +81,17 @@ class FilePathNormalizationTest(unittest.TestCase):
         self.assertIsNone(hook.normalize_file_path("/home/sam/api/a.ts", ""))
 
 
+class ModeNormalizationTest(unittest.TestCase):
+    def test_valid_modes_passthrough(self):
+        self.assertEqual(hook._normalize_mode("warn"), "warn")
+        self.assertEqual(hook._normalize_mode("ASK"), "ask")
+        self.assertEqual(hook._normalize_mode(" block "), "block")
+
+    def test_invalid_mode_falls_back_to_warn(self):
+        self.assertEqual(hook._normalize_mode("nonsense"), "warn")
+        self.assertEqual(hook._normalize_mode(""), "warn")
+
+
 class MessageFormattingTest(unittest.TestCase):
     def test_message_includes_intent_branch_and_age(self):
         msg = hook._format_conflict_message(

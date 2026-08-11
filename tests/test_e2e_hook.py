@@ -12,7 +12,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "hook", "coordinator_hook.py")
@@ -52,6 +54,7 @@ class E2EHookTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def setUp(self):
         # Fresh store per test — the handler reads the module global at request
@@ -188,6 +191,93 @@ class E2EHookTest(unittest.TestCase):
                 tmp, extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_b")},
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_pretooluse_stakes_claim_without_posttooluse(self):
+        # The race-narrowing behaviour: A's PreToolUse (no conflict) stakes the
+        # claim immediately, so B's PreToolUse sees it even though A never ran
+        # PostToolUse (i.e. A hasn't finished — or even started — its edit).
+        with tempfile.TemporaryDirectory() as tmp:
+            target = _make_repo(tmp)
+            a = self._run_hook(
+                self._event("PreToolUse", tmp, target=target, session="A"),
+                tmp, extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_a")},
+            )
+            self.assertEqual(a.returncode, 0, a.stderr)  # A saw no conflict, staked
+            b = self._run_hook(
+                self._event("PreToolUse", tmp, target=target, session="B"),
+                tmp, extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_b")},
+            )
+            self.assertEqual(b.returncode, 2, b.stderr)  # B now sees A's stake
+
+    def test_ask_mode_escalates_to_human(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = _make_repo(tmp)
+            self._run_hook(
+                self._event("PostToolUse", tmp, target=target, session="A"),
+                tmp, extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_a")},
+            )
+            proc = self._run_hook(
+                self._event("PreToolUse", tmp, target=target, session="B"),
+                tmp,
+                extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_b"), "COORD_MODE": "ask"},
+            )
+            # ask mode: exit 0, decision JSON on stdout (parsed only on exit 0).
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            decision = json.loads(proc.stdout)
+            self.assertEqual(
+                decision["hookSpecificOutput"]["permissionDecision"], "ask"
+            )
+
+    def test_block_mode_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = _make_repo(tmp)
+            self._run_hook(
+                self._event("PostToolUse", tmp, target=target, session="A"),
+                tmp, extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_a")},
+            )
+            proc = self._run_hook(
+                self._event("PreToolUse", tmp, target=target, session="B"),
+                tmp,
+                extra_env={"COORD_ID_FILE": os.path.join(tmp, "id_b"), "COORD_MODE": "block"},
+            )
+            self.assertEqual(proc.returncode, 2, proc.stderr)
+            self.assertIn("[block mode]", proc.stderr)
+
+    def test_slow_server_times_out_and_fails_open(self):
+        # Spec section 10: "Server slow (3s) -> hook times out and fails open."
+        class SlowHandler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                time.sleep(3.0)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"conflicts": []}')
+
+            def log_message(self, *a):
+                pass
+
+        slow = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+        port = slow.server_address[1]
+        t = threading.Thread(target=slow.serve_forever, daemon=True)
+        t.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = _make_repo(tmp)
+                start = time.time()
+                proc = self._run_hook(
+                    self._event("PreToolUse", tmp, target=target, session="B"),
+                    tmp,
+                    extra_env={
+                        "COORD_ID_FILE": os.path.join(tmp, "id_b"),
+                        "COORD_TIMEOUT": "0.4",  # well under the 3s server delay
+                    },
+                    url=f"http://127.0.0.1:{port}",
+                )
+                elapsed = time.time() - start
+                self.assertEqual(proc.returncode, 0, proc.stderr)  # failed open
+                self.assertLess(elapsed, 2.5, "hook should not wait for the slow server")
+        finally:
+            slow.shutdown()
+            slow.server_close()
 
 
 if __name__ == "__main__":

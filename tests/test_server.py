@@ -29,6 +29,7 @@ class ServerTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
         coordinator.STORE.close()
 
     def _url(self, path):

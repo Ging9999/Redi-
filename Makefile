@@ -1,5 +1,5 @@
 # Convenience commands. Everything is stdlib Python 3 — no install step.
-.PHONY: help test serve serve-open smoke install install-user docker-build docker-run clean
+.PHONY: help test bench serve serve-open smoke install install-user docker-build docker-run clean
 
 PYTHON ?= python3
 PORT   ?= 8787
@@ -17,6 +17,9 @@ help:
 
 test:
 	$(PYTHON) -m unittest discover -s tests -p "test_*.py" -v
+
+bench:
+	$(PYTHON) tests/bench.py -n $(or $(N),100) --label "$(or $(LABEL),Run)"
 
 serve:
 	COORD_PORT=$(PORT) $(PYTHON) server/coordinator.py

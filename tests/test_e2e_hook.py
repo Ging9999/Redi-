@@ -68,6 +68,8 @@ class E2EHookTest(unittest.TestCase):
         env["COORD_URL"] = url or self.base_url
         env["COORD_TIMEOUT"] = "2.0"
         env["COORD_ENABLED"] = "1"
+        # Isolate the session cache per test (each test has its own tmp repo).
+        env["COORD_CACHE_DIR"] = os.path.join(cwd, ".redi-cache")
         env.pop("COORD_TOKEN", None)
         # Isolate machine id per subprocess so we can simulate two machines.
         if extra_env:

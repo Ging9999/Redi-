@@ -70,19 +70,74 @@ Everything below is measured against these numbers, not assumed.
 
 ---
 
-## After optimization
+## After optimization (A1–A4, A6)
 
-_Populated by `make bench LABEL="AFTER (v1.1)"` once A1–A4 land; see below._
+### AFTER (v1.1)
 
-<!-- AFTER-RESULTS -->
+_Python 3.11.15, linux, n=100, localhost (no real DNS/TLS), 2026-08-11 16:47:40 UTC_
+
+| Measurement | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|
+| **PreToolUse end-to-end (server up)** | 32.0 | 39.0 | 42.7 |
+| **PreToolUse end-to-end (fail-open, server down)** | 32.0 | 34.7 | 35.9 |
+| _component:_ interpreter startup | 14.4 | 19.6 | 20.2 |
+| _component:_ git subprocess | 2.2 | 2.7 | 3.1 |
+| _component:_ network + server handling | 1.4 | 1.8 | 2.2 |
+| _derived:_ residual (imports/other) p50 | 14.0 | — | — |
+
+### What changed
+
+| | BEFORE p50 | AFTER p50 | |
+|---|---|---|---|
+| PreToolUse end-to-end | 89.5 ms | **32.0 ms** | −64% |
+| residual (imports/other) | 72.5 ms | **14.0 ms** | −81% |
+
+- **The import tax is gone.** Moving `urllib`/`subprocess`/`uuid`/`pathlib` off
+  module scope (A1) cut the residual from 72.5ms to 14.0ms. `normalize_file_path`
+  was also rewritten without `pathlib` (pure string ops).
+- **The hot path no longer touches git.** Session-stable values are resolved once
+  (SessionStart / first-edit bootstrap) and read from `~/.cache/redi`; the bench's
+  steady-state iterations shell out zero times (enforced by
+  `tests/test_v11_hook.py::ZeroSubprocessTest`).
+- **On a solo repo, edits make almost no requests.** The bench points at one repo
+  with one session; after the first `acquire` returns `quiet_until`, iterations
+  2–100 skip the network entirely (A3). That's why "server up" and "fail-open"
+  are identical — the common path makes no call either way. A 50-edit solo run
+  makes **1** HTTP request, comfortably under the ≤3 acceptance bar.
+- **What's left is interpreter startup** (14ms) — unavoidable while hooks are
+  `type: command` (a fresh `python3` per event). git (2ms) and network (1ms) are
+  noise. The "makes a request" path (fail-open row, which imports `urllib` and
+  attempts a connection every iteration) is also ~32ms, so a real request on
+  localhost adds only the round trip.
+
+### Off-localhost note
+
+These numbers hide real network cost. A2 (one `acquire` instead of check+stake)
+and A3 (usually zero requests) are what keep a *remote* server from being felt:
+on the quiet path there is no round trip to pay, and when there is one, it's a
+single one.
 
 ---
 
-## A5 — local daemon decision
+## A5 — local daemon decision: **not building it**
 
-_Deferred pending the AFTER numbers. Decision recorded here once A1–A4 are
-measured: build the unix-socket daemon only if the hot path still exceeds
-~50ms p95 after those land. If A3 lands well, most edits make no network call
-at all and the daemon is unnecessary._
+The structural fix for interpreter startup + connection setup is a local daemon
+holding a warm connection and cache, with hooks talking to it over a unix socket.
+The spec is explicit: build it only if the hot path still exceeds ~50ms p95 after
+A1–A4, and do not build it on principle.
 
-<!-- A5-DECISION -->
+**Decision: do not build the daemon in v1.1.** The evidence:
+
+- Post-optimization p95 is **39.0ms**, under the 50ms bar.
+- The dominant remaining cost is interpreter startup (14ms), which a daemon
+  reduces but does not eliminate (the hook process still has to start to talk to
+  the socket).
+- A3 already removes the network from the common (solo) case entirely, so the
+  daemon's warm-connection benefit applies mostly to multi-session repos, which
+  are the minority.
+- A daemon adds real cost the spec warns about: lifecycle management, orphan
+  processes, harder install, an extra thing to debug.
+
+Revisit if: (a) real-world remote-server p95 exceeds 50ms despite A2/A3, or
+(b) profiling shows a workload dominated by contested files (where quiet backoff
+never engages). Until then the cost/benefit is negative.

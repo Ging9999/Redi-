@@ -7,14 +7,16 @@ file — and, crucially, *what* that agent is doing (spec section 1).
 
 Stdlib only. Run it, point the hook client at it, done.
 
-Endpoints (spec section 5):
+Endpoints:
 
+    POST /claims/acquire               -> {conflicts, claim, quiet_until, overrides}
     POST /claims/check                 -> {conflicts: [Claim]}   (excludes caller)
     POST /claims                       -> {claim: Claim}          (register/refresh)
+    POST /claims/override              -> {ok: true}              (record an override)
     POST /sessions/{session_id}/intent -> {ok: true}              (set intent)
     POST /sessions/{session_id}/release-> {released: N}           (drop claims)
-    GET  /repos/{repo_key}/activity    -> {claims: [Claim]}       (debug/dashboard)
-    GET  /healthz                      -> {ok: true}              (liveness)
+    GET  /repos/{repo_key}/activity    -> {claims, contributors}  (debug/status; ETag)
+    GET  /healthz                      -> {ok: true, version}     (liveness)
 
 Auth: a single bearer token (spec section 5/2 — no multi-tenant auth in v1).
 Set ``COORD_TOKEN`` and clients must send ``Authorization: Bearer <token>``.
@@ -23,6 +25,7 @@ If ``COORD_TOKEN`` is unset the server runs open (development only) and says so.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -30,11 +33,11 @@ import signal
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # Allow running as `python3 server/coordinator.py` or `python3 -m server.coordinator`.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from store import DEFAULT_TTL_SECONDS, ClaimStore  # noqa: E402
+from store import DEFAULT_QUIET_SECONDS, DEFAULT_TTL_SECONDS, ClaimStore  # noqa: E402
 
 
 VERSION = "1.0.0"
@@ -103,14 +106,45 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             return
 
         parts = [p for p in path.split("/") if p != ""]
-        # GET /repos/{repo_key}/activity
+        # GET /repos/{repo_key}/activity?days=N
         if len(parts) == 3 and parts[0] == "repos" and parts[2] == "activity":
-            repo_key = unquote(parts[1])
-            claims = STORE.activity(repo_key)
-            self._send_json(200, {"claims": [c.to_dict() for c in claims]})
+            self._handle_activity(unquote(parts[1]), urlparse(self.path).query)
             return
 
         self._send_json(404, {"error": "not found"})
+
+    def _handle_activity(self, repo_key: str, query: str) -> None:
+        days = 7
+        try:
+            q = parse_qs(query)
+            if "days" in q:
+                days = max(0, float(q["days"][0]))
+        except (ValueError, KeyError):
+            pass
+        claims = STORE.activity(repo_key)
+        contributors = STORE.contributors(repo_key, since_seconds=days * 86400)
+        # A8: an ETag derived from claim identity + version (expires_at/intent),
+        # NOT the age fields, so it stays stable until the claim set changes.
+        sig = "|".join(
+            f"{c.file_path}:{c.session_id}:{c.machine_id}:{c.expires_at}:{c.intent}"
+            for c in claims
+        )
+        etag = '"' + hashlib.md5(sig.encode("utf-8")).hexdigest() + '"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        body = json.dumps({
+            "claims": [c.to_dict() for c in claims],
+            "contributors": contributors,
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("ETag", etag)
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -124,9 +158,17 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
 
         parts = [p for p in path.split("/") if p != ""]
 
+        # POST /claims/acquire
+        if parts == ["claims", "acquire"]:
+            self._handle_acquire(data)
+            return
         # POST /claims/check
         if parts == ["claims", "check"]:
             self._handle_check(data)
+            return
+        # POST /claims/override
+        if parts == ["claims", "override"]:
+            self._handle_override(data)
             return
         # POST /claims
         if parts == ["claims"]:
@@ -144,6 +186,34 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     # -- handlers -------------------------------------------------------------
+
+    def _handle_acquire(self, data: dict) -> None:
+        if not self._require_fields(data, ["repo_key", "file_path", "session_id", "machine_id"]):
+            return
+        result = STORE.acquire(
+            repo_key=data["repo_key"],
+            file_path=data["file_path"],
+            session_id=data["session_id"],
+            machine_id=data["machine_id"],
+            display_name=data.get("display_name", ""),
+            branch=data.get("branch", ""),
+            intent=data.get("intent"),
+        )
+        self._send_json(200, result)
+
+    def _handle_override(self, data: dict) -> None:
+        if not self._require_fields(
+            data, ["repo_key", "file_path", "target_session"]
+        ):
+            return
+        STORE.record_override(
+            repo_key=data["repo_key"],
+            file_path=data["file_path"],
+            target_session=data["target_session"],
+            overrider_name=data.get("overrider_name", ""),
+            reason=data.get("reason", ""),
+        )
+        self._send_json(200, {"ok": True})
 
     def _handle_check(self, data: dict) -> None:
         if not self._require_fields(data, ["repo_key", "file_path", "session_id", "machine_id"]):
@@ -218,9 +288,10 @@ def main() -> None:
     port = int(os.environ.get("COORD_PORT", "8787"))
     db_path = os.environ.get("COORD_DB", "coordinator.db")
     ttl = int(os.environ.get("COORD_TTL_SECONDS", str(DEFAULT_TTL_SECONDS)))
+    quiet = int(os.environ.get("COORD_QUIET_SECONDS", str(DEFAULT_QUIET_SECONDS)))
     AUTH_TOKEN = os.environ.get("COORD_TOKEN") or None
 
-    STORE = ClaimStore(db_path=db_path, ttl_seconds=ttl)
+    STORE = ClaimStore(db_path=db_path, ttl_seconds=ttl, quiet_seconds=quiet)
 
     server = build_server(host, port)
     stop_event = threading.Event()

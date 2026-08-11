@@ -9,8 +9,8 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hook"))
-import coordinator_hook as hook  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import redi.hook as hook  # noqa: E402
 
 
 class HookV11Base(unittest.TestCase):

@@ -1,77 +1,95 @@
-"""Unit tests for the settings.json installer merge logic (gap #9).
-
-The merge must be pure, idempotent, preserve existing content, and never
-create duplicate hook entries.
-"""
+"""Installer merge/uninstall tests: PATH-resolved commands (B2), idempotency,
+non-destructiveness, and clean removal (B4)."""
 
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hook"))
-import install  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from redi import install  # noqa: E402
 
 
-CMD = "python3 /path/to/coordinator_hook.py"
-ENV = {"COORD_URL": "http://x", "COORD_TOKEN": "t", "COORD_MODE": "warn", "COORD_TIMEOUT": "0.5"}
+ENV = {"COORD_URL": "http://x", "COORD_MODE": "warn"}
 
 
 class MergeTest(unittest.TestCase):
-    def test_installs_all_four_events(self):
-        merged, changes = install.merge_settings({}, CMD, 5, ENV)
-        for event, _ in install.HOOK_EVENTS:
+    def test_installs_all_events_path_resolved(self):
+        merged, changes = install.merge_settings({}, install.DEFAULT_PREFIX, 5, ENV)
+        for event, kebab, _ in install.HOOK_EVENTS:
             self.assertIn(event, merged["hooks"])
-        self.assertTrue(any("PreToolUse" in c for c in changes))
+            cmd = merged["hooks"][event][0]["hooks"][0]["command"]
+            self.assertEqual(cmd, f"redi hook {kebab}")
 
-    def test_matcher_applied_only_where_expected(self):
-        merged, _ = install.merge_settings({}, CMD, 5, ENV)
-        pre = merged["hooks"]["PreToolUse"][0]
-        self.assertEqual(pre["matcher"], "Edit|Write")
-        stop = merged["hooks"]["Stop"][0]
-        self.assertNotIn("matcher", stop)
+    def test_commands_contain_no_absolute_path(self):
+        # The whole point of B2: a committed settings.json must be portable.
+        merged, _ = install.merge_settings({}, install.DEFAULT_PREFIX, 5, {})
+        for event, _, _ in install.HOOK_EVENTS:
+            cmd = merged["hooks"][event][0]["hooks"][0]["command"]
+            self.assertNotIn("/", cmd.replace("redi hook", ""))
+            self.assertFalse(cmd.startswith("/"))
 
-    def test_env_block_merged(self):
-        merged, _ = install.merge_settings({}, CMD, 5, ENV)
-        self.assertEqual(merged["env"]["COORD_URL"], "http://x")
-        self.assertEqual(merged["env"]["COORD_TOKEN"], "t")
-
-    def test_none_env_values_skipped(self):
-        env = dict(ENV)
-        env["COORD_TOKEN"] = None
-        merged, _ = install.merge_settings({}, CMD, 5, env)
-        self.assertNotIn("COORD_TOKEN", merged.get("env", {}))
+    def test_matcher_only_on_tool_events(self):
+        merged, _ = install.merge_settings({}, install.DEFAULT_PREFIX, 5, {})
+        self.assertEqual(merged["hooks"]["PreToolUse"][0]["matcher"], "Edit|Write")
+        self.assertNotIn("matcher", merged["hooks"]["Stop"][0])
 
     def test_idempotent(self):
-        once, _ = install.merge_settings({}, CMD, 5, ENV)
-        twice, changes = install.merge_settings(once, CMD, 5, ENV)
+        once, _ = install.merge_settings({}, install.DEFAULT_PREFIX, 5, ENV)
+        twice, changes = install.merge_settings(once, install.DEFAULT_PREFIX, 5, ENV)
         self.assertEqual(once, twice)
         self.assertEqual(changes, [])
 
-    def test_preserves_existing_hooks_and_keys(self):
+    def test_no_env_writes_hooks_only(self):
+        merged, _ = install.merge_settings({}, install.DEFAULT_PREFIX, 5, {})
+        self.assertNotIn("env", merged)
+
+    def test_preserves_existing(self):
         existing = {
             "model": "claude-opus",
-            "hooks": {
-                "PreToolUse": [
-                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "other.sh"}]}
-                ]
-            },
+            "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "other.sh"}]}]},
         }
-        merged, _ = install.merge_settings(existing, CMD, 5, ENV)
-        # Original key preserved.
+        merged, _ = install.merge_settings(existing, install.DEFAULT_PREFIX, 5, ENV)
         self.assertEqual(merged["model"], "claude-opus")
-        # Original Bash hook preserved, ours appended alongside.
-        commands = [
-            h["command"]
-            for g in merged["hooks"]["PreToolUse"]
-            for h in g["hooks"]
-        ]
-        self.assertIn("other.sh", commands)
-        self.assertIn(CMD, commands)
+        cmds = [h["command"] for g in merged["hooks"]["PreToolUse"] for h in g["hooks"]]
+        self.assertIn("other.sh", cmds)
+        self.assertIn("redi hook pre-tool-use", cmds)
 
-    def test_does_not_mutate_input(self):
-        original = {"env": {"KEEP": "1"}}
-        install.merge_settings(original, CMD, 5, ENV)
-        self.assertEqual(original, {"env": {"KEEP": "1"}})
+
+class UninstallTest(unittest.TestCase):
+    def test_removes_only_redi(self):
+        merged, _ = install.merge_settings(
+            {"model": "x", "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"command": "keep.sh"}]}]}},
+            install.DEFAULT_PREFIX, 5, ENV)
+        cleaned, changes = install.uninstall_settings(merged)
+        self.assertTrue(changes)
+        self.assertEqual(cleaned["model"], "x")
+        # The unrelated Bash hook survives.
+        cmds = [h["command"] for g in cleaned["hooks"]["PreToolUse"] for h in g["hooks"]]
+        self.assertIn("keep.sh", cmds)
+        self.assertNotIn("redi hook pre-tool-use", cmds)
+        # COORD_* env removed.
+        self.assertNotIn("env", cleaned)
+
+    def test_uninstall_idempotent(self):
+        merged, _ = install.merge_settings({}, install.DEFAULT_PREFIX, 5, ENV)
+        once, _ = install.uninstall_settings(merged)
+        twice, changes = install.uninstall_settings(once)
+        self.assertEqual(changes, [])
+
+    def test_uninstall_restores_empty(self):
+        merged, _ = install.merge_settings({}, install.DEFAULT_PREFIX, 5, {})
+        cleaned, _ = install.uninstall_settings(merged)
+        self.assertEqual(cleaned, {})
+
+    def test_removes_legacy_absolute_path_hooks(self):
+        legacy = {"hooks": {"PreToolUse": [
+            {"matcher": "Edit|Write",
+             "hooks": [{"command": "python3 /abs/coordinator_hook.py"}]}]}}
+        cleaned, changes = install.uninstall_settings(legacy)
+        self.assertTrue(changes)
+        self.assertNotIn("hooks", cleaned)
 
 
 if __name__ == "__main__":

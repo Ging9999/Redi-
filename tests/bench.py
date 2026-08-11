@@ -32,11 +32,10 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOOK = os.path.join(ROOT, "hook", "coordinator_hook.py")
-sys.path.insert(0, os.path.join(ROOT, "server"))
+sys.path.insert(0, ROOT)
 
-import coordinator  # noqa: E402
-from store import ClaimStore  # noqa: E402
+import redi.server as coordinator  # noqa: E402
+from redi.store import ClaimStore  # noqa: E402
 
 
 def _pct(values: list[float], p: float) -> float:
@@ -77,8 +76,10 @@ def _make_repo(tmp):
 
 
 def _run_hook(event, cwd, env):
+    env = dict(env)
+    env["PYTHONPATH"] = ROOT + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
-        [sys.executable, HOOK],
+        [sys.executable, "-m", "redi", "hook", "pre-tool-use"],
         input=json.dumps(event),
         cwd=cwd,
         capture_output=True,

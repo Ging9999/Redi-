@@ -226,18 +226,47 @@ def load_toml_config(root: str) -> dict:
         return {}
 
 
+def _host_of(url: str) -> str:
+    try:
+        from . import creds
+        return creds.parse_join_url(url)["host"]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _resolve_token(url: str, toml: dict):
+    """Token precedence: env > .redi.toml (opt-in, see spec D) > saved
+    credentials keyed by host. Credentials keep the secret out of the repo."""
+    env_tok = _env("COORD_TOKEN")
+    if env_tok:
+        return env_tok
+    if toml.get("token"):
+        return toml["token"]
+    host = _host_of(url)
+    if host:
+        try:
+            from . import creds
+            cred = creds.get_credential(host)
+            if cred and cred.get("token"):
+                return cred["token"]
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 def resolve_config(root: str) -> dict:
-    """Full config resolution (env > .redi.toml > default). Used at SessionStart
-    and by the CLI; the hot path reads the cached result and only re-applies env
-    overrides (see ``_hot_config``)."""
+    """Full config resolution (env > .redi.toml > saved credentials > default).
+    Used at SessionStart and by the CLI; the hot path reads the cached result and
+    only re-applies env overrides (see ``_hot_config``)."""
     toml = load_toml_config(root)
 
     def pick(env_name, toml_key, default):
         return _env(env_name) or toml.get(toml_key) or default
 
+    url = str(pick("COORD_URL", "url", DEFAULT_URL)).rstrip("/")
     return {
-        "url": str(pick("COORD_URL", "url", DEFAULT_URL)).rstrip("/"),
-        "token": _env("COORD_TOKEN") or toml.get("token") or None,
+        "url": url,
+        "token": _resolve_token(url, toml),
         "mode": _normalize_mode(pick("COORD_MODE", "mode", "warn")),
         "timeout": float(pick("COORD_TIMEOUT", "timeout", DEFAULT_TIMEOUT)),
         "ttl_seconds": int(pick("COORD_TTL_SECONDS", "ttl_seconds", DEFAULT_TTL_SECONDS)),
@@ -688,8 +717,21 @@ HANDLERS = {
     "Stop": handle_stop,
 }
 
+# Kebab aliases for the `redi hook <event>` CLI form (spec B2), so a committed
+# settings.json can use PATH-resolved commands like `redi hook pre-tool-use`.
+_KEBAB = {
+    "session-start": "SessionStart",
+    "user-prompt-submit": "UserPromptSubmit",
+    "pre-tool-use": "PreToolUse",
+    "post-tool-use": "PostToolUse",
+    "stop": "Stop",
+}
 
-def main() -> int:
+
+def run(event_name: str | None = None) -> int:
+    """Read the event JSON from stdin and dispatch. ``event_name`` (from the
+    ``redi hook <event>`` arg) wins; otherwise fall back to the JSON's
+    ``hook_event_name``. Fails open on everything."""
     if not _env_bool("COORD_ENABLED", True):
         return 0
     try:
@@ -700,7 +742,9 @@ def main() -> int:
     except (json.JSONDecodeError, ValueError):
         return 0
 
-    handler = HANDLERS.get(event.get("hook_event_name") or "")
+    name = _KEBAB.get((event_name or "").strip().lower())
+    name = name or event.get("hook_event_name") or ""
+    handler = HANDLERS.get(name)
     if not handler:
         return 0
     try:
@@ -708,6 +752,11 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 — fail open on anything unexpected.
         sys.stderr.write(f"[redi] non-fatal error (failing open): {exc}\n")
         return 0
+
+
+def main() -> int:
+    # `python3 -m redi.hook [event]` — event optional, falls back to stdin.
+    return run(sys.argv[1] if len(sys.argv) > 1 else None)
 
 
 if __name__ == "__main__":

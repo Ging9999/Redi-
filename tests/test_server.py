@@ -9,11 +9,9 @@ import unittest
 import urllib.error
 import urllib.request
 
-SERVER_DIR = os.path.join(os.path.dirname(__file__), "..", "server")
-sys.path.insert(0, SERVER_DIR)
-
-import coordinator  # noqa: E402
-from store import ClaimStore  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import redi.server as coordinator  # noqa: E402
+from redi.store import ClaimStore  # noqa: E402
 
 
 class ServerTest(unittest.TestCase):

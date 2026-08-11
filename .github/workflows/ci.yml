@@ -28,8 +28,14 @@ jobs:
       - name: Run tests
         run: python3 -m unittest discover -s tests -p "test_*.py" -v
 
-      - name: Installer dry-run smoke check
-        run: python3 hook/install.py --dry-run --settings /tmp/settings.json
+      - name: Package installs and console script works
+        run: |
+          pip install .
+          redi --help
+          redi hook pre-tool-use < /dev/null   # no stdin event -> no-op, exit 0
 
-      - name: CLI import + help smoke check
-        run: python3 cli/redi.py --help
+      - name: Installer dry-run smoke check
+        run: python3 -m redi.install --dry-run --settings /tmp/settings.json
+
+      - name: Build the zipapp
+        run: python3 tools/build_pyz.py && python3 dist/redi.pyz --help

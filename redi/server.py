@@ -35,12 +35,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-# Allow running as `python3 server/coordinator.py` or `python3 -m server.coordinator`.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from store import DEFAULT_QUIET_SECONDS, DEFAULT_TTL_SECONDS, ClaimStore  # noqa: E402
+from . import __version__
+from .store import DEFAULT_QUIET_SECONDS, DEFAULT_TTL_SECONDS, ClaimStore
 
 
-VERSION = "1.0.0"
+VERSION = __version__
 
 # Populated in main(); a module global so the handler class can reach it.
 STORE: ClaimStore | None = None
@@ -281,30 +280,68 @@ def _start_sweeper(interval_seconds: float, stop_event: threading.Event) -> thre
     return t
 
 
-def main() -> None:
+def join_string() -> str:
+    """The `redi join ...` command a host shares with the team (spec C3)."""
+    from . import creds
+    token, _ = creds.load_or_create_server_token()
+    port = int(os.environ.get("COORD_PORT", "8787"))
+    return "redi join " + creds.build_join_url(token, creds.external_host(), port)
+
+
+def print_join(stream=None) -> None:
+    (stream or sys.stdout).write(
+        "\nShare this with your team:\n\n    " + join_string() + "\n\n"
+    )
+
+
+def serve(local: bool = False) -> None:
+    """Run the coordination server. ``local`` = zero-config localhost, open mode
+    (spec C5), for evaluating with two sessions on one machine."""
     global STORE, AUTH_TOKEN
+    from . import creds
+
+    if local:
+        os.environ.setdefault("COORD_HOST", "127.0.0.1")
+        os.environ.setdefault("COORD_DB", ":memory:")
+        os.environ["COORD_TOKEN"] = ""  # open mode
 
     host = os.environ.get("COORD_HOST", "127.0.0.1")
     port = int(os.environ.get("COORD_PORT", "8787"))
     db_path = os.environ.get("COORD_DB", "coordinator.db")
     ttl = int(os.environ.get("COORD_TTL_SECONDS", str(DEFAULT_TTL_SECONDS)))
     quiet = int(os.environ.get("COORD_QUIET_SECONDS", str(DEFAULT_QUIET_SECONDS)))
-    AUTH_TOKEN = os.environ.get("COORD_TOKEN") or None
+
+    # C3: first-run token generation — no secret to invent, none to configure.
+    if local:
+        AUTH_TOKEN = None
+        token_created = False
+    else:
+        AUTH_TOKEN, token_created = creds.load_or_create_server_token()
 
     STORE = ClaimStore(db_path=db_path, ttl_seconds=ttl, quiet_seconds=quiet)
 
     server = build_server(host, port)
     stop_event = threading.Event()
-    # Sweep at half the TTL so lapsed claims never linger longer than ~1.5x TTL.
     _start_sweeper(max(30.0, ttl / 2.0), stop_event)
 
-    auth_state = "token auth ENABLED" if AUTH_TOKEN else "OPEN (no COORD_TOKEN set — dev only)"
+    if AUTH_TOKEN:
+        auth_state = "token auth ENABLED" + (" (generated on first run)" if token_created else "")
+    else:
+        auth_state = "OPEN (no token — local/dev only)"
+    sys.stdout.write(f"\nRedi {VERSION} running on :{port}\n")
+    sys.stdout.write(f"Data: {db_path}\n")
     sys.stderr.write(
         f"[coordinator] v{VERSION} listening on http://{host}:{port}  "
         f"db={db_path}  ttl={ttl}s  {auth_state}\n"
     )
+    # Print the join string on EVERY startup (spec C3) — the host needs it again
+    # each time a new person joins and shouldn't have to hunt for it.
+    if not local:
+        print_join()
+    else:
+        sys.stdout.write("\nLocal mode (open, in-memory). Point a session at:\n"
+                         f"    redi join redi://127.0.0.1:{port}\n\n")
 
-    # Handle SIGTERM (Docker/systemd stop) as cleanly as Ctrl-C.
     def _graceful(signum, _frame):
         sys.stderr.write(f"\n[coordinator] signal {signum}, shutting down\n")
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -321,5 +358,9 @@ def main() -> None:
         STORE.close()
 
 
+# Backwards-compatible alias.
+main = serve
+
+
 if __name__ == "__main__":
-    main()
+    serve()

@@ -17,11 +17,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOOK = os.path.join(ROOT, "hook", "coordinator_hook.py")
-sys.path.insert(0, os.path.join(ROOT, "server"))
+sys.path.insert(0, ROOT)
 
-import coordinator  # noqa: E402
-from store import ClaimStore  # noqa: E402
+import redi.server as coordinator  # noqa: E402
+from redi.store import ClaimStore  # noqa: E402
 
 
 def _git(cwd, *args):
@@ -71,11 +70,16 @@ class E2EHookTest(unittest.TestCase):
         # Isolate the session cache per test (each test has its own tmp repo).
         env["COORD_CACHE_DIR"] = os.path.join(cwd, ".redi-cache")
         env.pop("COORD_TOKEN", None)
+        # Make the `redi` package importable from any cwd (as an installed
+        # console script would be on PATH).
+        env["PYTHONPATH"] = ROOT + os.pathsep + env.get("PYTHONPATH", "")
         # Isolate machine id per subprocess so we can simulate two machines.
         if extra_env:
             env.update(extra_env)
+        # Invoke exactly as the PATH-resolved hook does: `redi hook` reading the
+        # event name from stdin's hook_event_name (event arg omitted here).
         proc = subprocess.run(
-            [sys.executable, HOOK],
+            [sys.executable, "-m", "redi", "hook"],
             input=json.dumps(event),
             cwd=cwd,
             capture_output=True,

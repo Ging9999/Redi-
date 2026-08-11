@@ -7,10 +7,9 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(HERE, "..", "hook"))
-sys.path.insert(0, os.path.join(HERE, "..", "cli"))
-import coordinator_hook as hook  # noqa: E402
-import redi as cli  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, ".."))
+import redi.hook as hook  # noqa: E402
+import redi.cli as cli  # noqa: E402
 
 
 class SettingsResolutionTest(unittest.TestCase):

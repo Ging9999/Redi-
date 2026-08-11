@@ -7,8 +7,8 @@ import sys
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
-from store import ClaimStore  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from redi.store import ClaimStore  # noqa: E402
 
 
 class AcquireTest(unittest.TestCase):

@@ -5,8 +5,8 @@ import sys
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
-from store import ClaimStore  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from redi.store import ClaimStore  # noqa: E402
 
 
 class StoreTest(unittest.TestCase):
@@ -113,7 +113,7 @@ class StoreTest(unittest.TestCase):
         self.assertLessEqual(d["expires_in_seconds"], 100)
 
     def test_intent_is_length_capped(self):
-        from store import MAX_INTENT_CHARS
+        from redi.store import MAX_INTENT_CHARS
 
         huge = "x" * (MAX_INTENT_CHARS + 500)
         self.store.set_intent("s1", huge)

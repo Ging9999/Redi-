@@ -234,13 +234,21 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _committed_token_ok(toml: dict) -> bool:
+    """A token in a committed .redi.toml is honored ONLY with an explicit opt-in
+    key (spec D DECIDE). Anyone with repo read access can then read and write
+    claims; that's the team's call to make deliberately, not by accident."""
+    v = toml.get("allow_committed_token")
+    return v is True or str(v).strip().lower() in ("1", "true", "yes")
+
+
 def _resolve_token(url: str, toml: dict):
-    """Token precedence: env > .redi.toml (opt-in, see spec D) > saved
+    """Token precedence: env > .redi.toml (explicit opt-in, spec D) > saved
     credentials keyed by host. Credentials keep the secret out of the repo."""
     env_tok = _env("COORD_TOKEN")
     if env_tok:
         return env_tok
-    if toml.get("token"):
+    if toml.get("token") and _committed_token_ok(toml):
         return toml["token"]
     host = _host_of(url)
     if host:
@@ -478,8 +486,22 @@ def _maybe_refresh_branch(ctx: Ctx, cache: dict) -> None:
 def handle_session_start(ctx: Ctx) -> int:
     cache = build_session_cache(ctx.session_id, ctx.cwd)
     save_cache(ctx.session_id, cache)
+    _committed_token_notice(cache.get("root") or "")
     _coverage_nudge(ctx, cache)
     return 0
+
+
+def _committed_token_notice(root: str) -> None:
+    """State plainly what a committed token exposes, when one is in use (spec D)."""
+    try:
+        toml = load_toml_config(root)
+        if toml.get("token") and _committed_token_ok(toml):
+            sys.stderr.write(
+                "[redi] using the token committed in .redi.toml — anyone with "
+                "read access to this repo can read and write coordination claims.\n"
+            )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _coverage_nudge(ctx: Ctx, cache: dict) -> None:

@@ -33,9 +33,11 @@ jobs:
       - name: Derive tags
         id: meta
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          # Fixed image name `redi` under the owner, so it matches
+          # docker-compose.yml regardless of the repo's own name.
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           VER="${GITHUB_REF_NAME#v}"
-          echo "tags=ghcr.io/${REPO}:${VER},ghcr.io/${REPO}:latest" >> "$GITHUB_OUTPUT"
+          echo "tags=ghcr.io/${OWNER}/redi:${VER},ghcr.io/${OWNER}/redi:latest" >> "$GITHUB_OUTPUT"
 
       - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@v6

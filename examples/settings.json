@@ -1,70 +1,25 @@
 {
-  "_comment": "Example .claude/settings.json wiring for the agent coordination hook. Copy the `hooks` and `env` blocks into your own settings.json. Adjust the absolute path to coordinator_hook.py. Matchers are CASE-SENSITIVE (spec section 3): `Edit|Write` matches the Edit and Write tools; `edit` would match nothing.",
+  "_comment": "Example .claude/settings.json wiring for Redi. `redi join` writes this for you; this file shows what it produces. Commands are PATH-resolved (`redi hook <event>`) so a committed project-level copy works on every machine and degrades to a no-op where redi isn't installed. Matchers are CASE-SENSITIVE: `Edit|Write` matches the Edit and Write tools. The token is NOT here — it lives in ~/.config/redi/credentials; only the non-secret COORD_URL goes in env (or in a committed .redi.toml).",
 
   "env": {
-    "COORD_URL": "http://127.0.0.1:8787",
-    "COORD_TOKEN": "replace-with-your-shared-token",
-    "COORD_MODE": "warn",
-    "COORD_TIMEOUT": "0.5"
+    "COORD_URL": "http://redi.acme.internal:8787"
   },
 
   "hooks": {
     "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/hook/coordinator_hook.py",
-            "timeout": 5
-          }
-        ]
-      }
+      { "hooks": [ { "type": "command", "command": "redi hook session-start", "timeout": 5 } ] }
     ],
     "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/hook/coordinator_hook.py",
-            "timeout": 5
-          }
-        ]
-      }
+      { "hooks": [ { "type": "command", "command": "redi hook user-prompt-submit", "timeout": 5 } ] }
     ],
     "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/hook/coordinator_hook.py",
-            "timeout": 5
-          }
-        ]
-      }
+      { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "redi hook pre-tool-use", "timeout": 5 } ] }
     ],
     "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/hook/coordinator_hook.py",
-            "timeout": 5
-          }
-        ]
-      }
+      { "matcher": "Edit|Write", "hooks": [ { "type": "command", "command": "redi hook post-tool-use", "timeout": 5 } ] }
     ],
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /ABSOLUTE/PATH/TO/hook/coordinator_hook.py",
-            "timeout": 5
-          }
-        ]
-      }
+      { "hooks": [ { "type": "command", "command": "redi hook stop", "timeout": 5 } ] }
     ]
   }
 }

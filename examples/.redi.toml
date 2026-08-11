@@ -8,4 +8,9 @@ url = "https://redi.internal.example.com"
 mode = "warn"          # warn | ask | block
 timeout = 0.5          # per-request timeout, seconds
 ttl_seconds = 900      # claim TTL (also sets refresh debounce to TTL/3)
-# token = "shared-secret"   # prefer COORD_TOKEN in the environment for secrets
+# Committing the token here makes onboarding a one-step clone-and-go (no join
+# command), but anyone with repo read access can then read/write claims. It is
+# therefore honored ONLY with the explicit opt-in below. Recommended: leave both
+# unset and let each teammate run `redi join` (token stored per-machine, 0600).
+# token = "shared-secret"
+# allow_committed_token = true

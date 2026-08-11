@@ -74,6 +74,24 @@ class TomlConfigTest(unittest.TestCase):
             finally:
                 os.environ.pop("COORD_URL", None)
 
+    def test_committed_token_ignored_without_optin(self):
+        # Spec D: a committed token is honored ONLY with an explicit opt-in key.
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, ".redi.toml"), "w") as fh:
+                fh.write('url = "http://h:1"\ntoken = "committed-secret"\n')
+            os.environ.pop("COORD_TOKEN", None)
+            cfg = hook.resolve_config(tmp)
+            self.assertIsNone(cfg["token"])   # ignored without opt-in
+
+    def test_committed_token_honored_with_optin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, ".redi.toml"), "w") as fh:
+                fh.write('url = "http://h:1"\ntoken = "committed-secret"\n'
+                         'allow_committed_token = true\n')
+            os.environ.pop("COORD_TOKEN", None)
+            cfg = hook.resolve_config(tmp)
+            self.assertEqual(cfg["token"], "committed-secret")
+
     def test_no_toml_uses_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             for k in ("COORD_URL", "COORD_MODE", "COORD_TIMEOUT"):

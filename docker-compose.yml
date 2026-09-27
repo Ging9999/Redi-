@@ -1,0 +1,19 @@
+# The primary hosting path (spec C1). Drop-in, no arguments:
+#
+#     docker compose up -d
+#     docker compose logs redi        # shows the `redi join ...` string to share
+#
+# Everything defaults. The token is auto-generated to ./redi-data/token on first
+# run and printed on every startup. Set COORD_EXTERNAL_HOST to the address your
+# team reaches this server at, so the printed join string is pasteable as-is.
+services:
+  redi:
+    image: ghcr.io/ging9999/redi:1.2
+    # Or build locally instead of pulling:  docker compose up --build
+    build: .
+    ports: ["8787:8787"]
+    volumes: ["./redi-data:/data"]
+    environment:
+      # COORD_EXTERNAL_HOST: redi.acme.internal   # uncomment + set for a shareable join string
+      COORD_PORT: "8787"
+    restart: unless-stopped

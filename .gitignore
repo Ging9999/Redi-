@@ -1,0 +1,20 @@
+# SQLite claim store + server data
+coordinator.db
+redi.db
+*.db-journal
+*.db-wal
+*.db-shm
+redi-data/
+/data/
+
+# Build artifacts
+dist/
+build/
+*.pyz
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

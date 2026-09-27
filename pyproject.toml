@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redi-coordinator"
+description = "Cross-machine edit coordination for Claude Code agents — know when another agent is editing a file, and what it's doing."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "James B" }]
+keywords = ["claude", "claude-code", "agents", "coordination", "hooks"]
+dynamic = ["version"]
+dependencies = []   # stdlib only — a deliberate zero-dependency design
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ging9999/Redi-"
+Source = "https://github.com/Ging9999/Redi-"
+
+[project.scripts]
+redi = "redi.cli:main"
+
+[tool.setuptools]
+packages = ["redi"]
+
+[tool.setuptools.dynamic]
+version = { attr = "redi.__version__" }

@@ -1,0 +1,15 @@
+{
+  "_comment": "Reference for every environment variable the hook client reads. These are normally set in the `env` block of .claude/settings.json (see examples/settings.json), not in a file — the hook does not read this JSON. It exists only as documentation. Shared team settings (URL/mode) can also live in a committed .redi.toml at the repo root; env vars override it.",
+
+  "COORD_URL": "http://127.0.0.1:8787   (base URL of the coordination server)",
+  "COORD_TOKEN": "shared-bearer-token    (must match the server's COORD_TOKEN; omit for open dev mode)",
+  "COORD_MODE": "warn                    (warn | ask | block — default warn)",
+  "COORD_TIMEOUT": "0.5                   (per-request timeout in seconds; fail open past this)",
+  "COORD_ENABLED": "1                     (set to 0/false to disable the hook without editing settings.json)",
+  "COORD_ID_FILE": "~/.config/agent-coordinator/id   (where the persistent machine id is stored)",
+  "COORD_CACHE_DIR": "~/.cache/redi        (session cache location; the fast path reads it instead of shelling out to git)",
+  "COORD_TTL_SECONDS": "900               (claim TTL; also sets the refresh debounce to TTL/3)",
+  "COORD_SUPPRESS_SECONDS": "600          (B4: how long a repeat conflict warning stays suppressed)",
+  "COORD_FORCE": "0                       (B5: set to 1 to proceed past a block and record an override)",
+  "COORD_FORCE_REASON": "                 (B5: reason string shown to the overridden agent)"
+}
